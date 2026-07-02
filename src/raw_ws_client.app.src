@@ -1,0 +1,14 @@
+{application, raw_ws_client,
+ [
+  {description, "Raw WebSocket client implemented from TCP"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications, [kernel, stdlib, crypto]},
+  {env, []},
+  {modules, [
+      raw_ws_client,
+      raw_ws_frame,
+      raw_ws_handshake
+  ]}
+ ]}.
+
