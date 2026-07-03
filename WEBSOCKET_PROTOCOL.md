@@ -194,3 +194,258 @@ wss://example.com/ws?v=1
 ```
 
 如果协议发生不兼容变更，必须升级主版本号。
+
+## 10. 底层 Frame 格式
+
+WebSocket 握手成功后，不再传输 HTTP 请求和响应，而是传输 WebSocket frame。
+
+一个 WebSocket frame 的基本结构如下：
+
+```text
+0                   1                   2                   3
+0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-------+-+-------------+-------------------------------+
+|F|R|R|R| opcode|M| Payload len | Extended payload length       |
+|I|S|S|S|  (4)  |A|     (7)     | 16 bits 或 64 bits            |
+|N|V|V|V|       |S|             |                               |
++-+-+-+-+-------+-+-------------+-------------------------------+
+| Masking-key, if MASK set                                      |
++---------------------------------------------------------------+
+| Payload data                                                  |
++---------------------------------------------------------------+
+```
+
+### 10.1 第 1 字节
+
+第 1 字节由 `FIN`、`RSV1`、`RSV2`、`RSV3` 和 `opcode` 组成：
+
+```text
+FIN RSV1 RSV2 RSV3 opcode
+1bit 1bit 1bit 1bit 4bit
+```
+
+字段说明：
+
+| 字段 | 位数 | 说明 |
+| --- | --- | --- |
+| `FIN` | 1 | 是否为当前消息的最后一帧。`1` 表示最后一帧。 |
+| `RSV1` | 1 | 扩展保留位。未协商扩展时必须为 `0`。 |
+| `RSV2` | 1 | 扩展保留位。未协商扩展时必须为 `0`。 |
+| `RSV3` | 1 | 扩展保留位。未协商扩展时必须为 `0`。 |
+| `opcode` | 4 | 帧类型。 |
+
+常见 `opcode`：
+
+| opcode | 含义 |
+| --- | --- |
+| `0x0` | continuation frame，延续帧。 |
+| `0x1` | text frame，文本帧。 |
+| `0x2` | binary frame，二进制帧。 |
+| `0x8` | close，关闭连接。 |
+| `0x9` | ping。 |
+| `0xA` | pong。 |
+
+例如：
+
+```text
+1000 0001
+```
+
+表示：
+
+```text
+FIN = 1
+RSV1 = 0
+RSV2 = 0
+RSV3 = 0
+opcode = 0x1
+```
+
+也就是完整文本帧。十六进制是：
+
+```erlang
+16#81
+```
+
+### 10.2 第 2 字节
+
+第 2 字节由 `MASK` 和 `Payload len` 组成：
+
+```text
+MASK Payload len
+1bit 7bit
+```
+
+字段说明：
+
+| 字段 | 位数 | 说明 |
+| --- | --- | --- |
+| `MASK` | 1 | payload 是否经过 mask。客户端发给服务端的 frame 必须为 `1`。 |
+| `Payload len` | 7 | payload 长度或扩展长度标记。 |
+
+payload 长度规则：
+
+| `Payload len` 值 | 实际含义 |
+| --- | --- |
+| `0` 到 `125` | 该值就是 payload 实际长度。 |
+| `126` | 后面继续读取 2 字节 unsigned integer，作为实际长度。 |
+| `127` | 后面继续读取 8 字节 unsigned integer，作为实际长度。 |
+
+### 10.3 Masking Key
+
+如果 `MASK = 1`，payload 前面会有 4 字节 `masking key`。
+
+客户端发给服务端的 frame 必须 mask：
+
+```text
+MASK = 1
+```
+
+服务端发给客户端的 frame 通常不 mask：
+
+```text
+MASK = 0
+```
+
+解码规则：
+
+```text
+payload[i] = masked_payload[i] XOR masking_key[i mod 4]
+```
+
+Erlang 中对应：
+
+```erlang
+UnmaskedByte = MaskedByte bxor MaskKeyByte.
+```
+
+### 10.4 示例：服务端发送文本 hello
+
+服务端发送文本消息 `hello`：
+
+```text
+81 05 68 65 6c 6c 6f
+```
+
+解释：
+
+```text
+81 = FIN=1, opcode=0x1 text
+05 = MASK=0, payload length=5
+68 65 6c 6c 6f = hello
+```
+
+Erlang binary 表示：
+
+```erlang
+<<16#81, 5, "hello">>
+```
+
+### 10.5 示例：客户端发送文本 hello
+
+客户端发送文本消息 `hello` 时必须 mask。一个可能的 frame：
+
+```text
+81 85 37 fa 21 3d 5f 9f 4d 51 58
+```
+
+解释：
+
+```text
+81 = FIN=1, opcode=0x1 text
+85 = MASK=1, payload length=5
+37 fa 21 3d = masking key
+5f 9f 4d 51 58 = masked payload
+```
+
+其中 `0x85` 的二进制是：
+
+```text
+1000 0101
+```
+
+含义是：
+
+```text
+MASK = 1
+payload length = 5
+```
+
+### 10.6 解码步骤
+
+解析一个 frame 的顺序：
+
+```text
+1. 读取第 1 字节，解析 FIN、RSV1、RSV2、RSV3、opcode。
+2. 读取第 2 字节，解析 MASK 和 Payload len。
+3. 如果 Payload len 是 126，继续读取 2 字节扩展长度。
+4. 如果 Payload len 是 127，继续读取 8 字节扩展长度。
+5. 如果 MASK 是 1，继续读取 4 字节 masking key。
+6. 读取 payload data。
+7. 如果 MASK 是 1，对 payload data 做 XOR 解码。
+```
+
+Erlang 中常用位运算解析：
+
+```erlang
+Fin = (B1 band 16#80) =/= 0,
+Rsv = (B1 band 16#70) bsr 4,
+Opcode = B1 band 16#0F,
+
+Masked = (B2 band 16#80) =/= 0,
+Len0 = B2 band 16#7F.
+```
+
+掩码说明：
+
+| 表达式 | 二进制 | 作用 |
+| --- | --- | --- |
+| `16#80` | `1000 0000` | 取最高位。 |
+| `16#70` | `0111 0000` | 取 RSV1、RSV2、RSV3。 |
+| `16#0F` | `0000 1111` | 取 opcode。 |
+| `16#7F` | `0111 1111` | 取 payload length。 |
+
+### 10.7 控制帧限制
+
+`close`、`ping`、`pong` 属于控制帧，限制如下：
+
+```text
+payload length 必须 <= 125
+不能被分片
+FIN 必须为 1
+```
+
+### 10.8 分片消息
+
+一条消息可以被拆成多个 frame：
+
+```text
+第一帧：
+FIN=0, opcode=0x1 text
+
+中间帧：
+FIN=0, opcode=0x0 continuation
+
+最后一帧：
+FIN=1, opcode=0x0 continuation
+```
+
+例如：
+
+```text
+frame 1: FIN=0, opcode=text, payload="hel"
+frame 2: FIN=1, opcode=continuation, payload="lo"
+```
+
+最终组合成：
+
+```text
+hello
+```
+
+当前项目第一版可以先不实现分片，只处理：
+
+```text
+FIN=1
+opcode=text / binary / ping / pong / close
+```

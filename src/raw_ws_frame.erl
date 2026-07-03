@@ -2,6 +2,8 @@
 
 -export([encode/2, read/3]).
 
+-include("../include/raw_ws.hrl").
+
 encode(text, Payload) ->
     encode(16#1, Payload);
 encode(binary, Payload) ->
@@ -80,7 +82,13 @@ read_payload(Socket, Rest, Timeout, Fin, Rsv, Opcode, Len, MaskKey) ->
                     undefined -> Payload0;
                     _ -> mask(Payload0, MaskKey)
                 end,
-            {ok, #{fin => Fin, rsv => Rsv, opcode => Opcode, payload => Payload}, Rest2};
+            {ok, #ws_frame{
+                fin = Fin,
+                rsv = Rsv,
+                opcode = Opcode,
+                masked = MaskKey =/= undefined,
+                payload = Payload
+            }, Rest2};
         Error ->
             Error
     end.
@@ -110,4 +118,3 @@ mask(<<Byte, Rest/binary>>, Key, Index, Acc) ->
             3 -> element(4, Key)
         end,
     mask(Rest, Key, Index + 1, [Byte bxor MaskByte | Acc]).
-

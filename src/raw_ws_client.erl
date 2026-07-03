@@ -10,6 +10,8 @@
     recv/1
 ]).
 
+-include("../include/raw_ws.hrl").
+
 -record(ws, {
     socket,
     buffer = <<>>,
@@ -62,20 +64,20 @@ recv(State = #ws{socket = Socket, buffer = Buffer, timeout = Timeout}) ->
             Error
     end.
 
-handle_frame(State = #ws{socket = Socket}, #{opcode := 16#1, payload := Payload}) ->
+handle_frame(State = #ws{socket = Socket}, #ws_frame{opcode = 16#1, payload = Payload}) ->
     {ok, {text, Payload}, State};
-handle_frame(State, #{opcode := 16#2, payload := Payload}) ->
+handle_frame(State, #ws_frame{opcode = 16#2, payload = Payload}) ->
     {ok, {binary, Payload}, State};
-handle_frame(State = #ws{socket = Socket}, #{opcode := 16#9, payload := Payload}) ->
+handle_frame(State = #ws{socket = Socket}, #ws_frame{opcode = 16#9, payload = Payload}) ->
     ok = gen_tcp:send(Socket, raw_ws_frame:encode(pong, Payload)),
     {ok, {ping, Payload}, State};
-handle_frame(State, #{opcode := 16#A, payload := Payload}) ->
+handle_frame(State, #ws_frame{opcode = 16#A, payload = Payload}) ->
     {ok, {pong, Payload}, State};
-handle_frame(State = #ws{socket = Socket}, #{opcode := 16#8, payload := Payload}) ->
+handle_frame(State = #ws{socket = Socket}, #ws_frame{opcode = 16#8, payload = Payload}) ->
     _ = gen_tcp:send(Socket, raw_ws_frame:encode(close, Payload)),
     gen_tcp:close(Socket),
     {ok, parse_close(Payload), State};
-handle_frame(State, #{opcode := Opcode, payload := Payload}) ->
+handle_frame(State, #ws_frame{opcode = Opcode, payload = Payload}) ->
     {error, {unsupported_opcode, Opcode, Payload}, State}.
 
 parse_close(<<Code:16/big, Reason/binary>>) ->
@@ -84,4 +86,3 @@ parse_close(<<>>) ->
     {close, undefined, <<>>};
 parse_close(Reason) ->
     {close, malformed, Reason}.
-

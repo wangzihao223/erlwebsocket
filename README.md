@@ -12,6 +12,26 @@
 - 客户端发送 frame 时自动 mask
 - 文本、二进制、ping、pong、close
 
+## 数据结构
+
+WebSocket frame 使用固定 record，定义在 `include/raw_ws.hrl`：
+
+```erlang
+-record(ws_frame, {
+    fin,
+    rsv = 0,
+    opcode,
+    masked = false,
+    payload = <<>>
+}).
+```
+
+解码函数返回：
+
+```erlang
+{ok, #ws_frame{}, Rest}
+```
+
 暂未实现：
 
 - `wss://` TLS 连接
@@ -78,4 +98,3 @@ ok = raw_ws_client:close(C1).
 3. 增加断线重连
 4. 支持分片消息
 5. 支持 `wss://`
-

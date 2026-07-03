@@ -2,21 +2,25 @@
 
 -export([client/5]).
 
--define(WS_GUID, <<"258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>).
+-ifdef(TEST).
+-export([read_response/3]).
+-endif.
 
+-define(WS_GUID, <<"258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>).
+-define(MAX_HEADER_SIZE, 8192).
+
+-spec client(gen_tcp:socket(), unicode:chardata(), inet:port_number(),
+    unicode:chardata(),
+    timeout()) ->
+    {ok, binary()} | {error, term()}.
 client(Socket, Host, Port, Path, Timeout) ->
     Key = base64:encode(crypto:strong_rand_bytes(16)),
     Request = request(Host, Port, Path, Key),
     case gen_tcp:send(Socket, Request) of
         ok ->
-            case read_response(Socket, <<>>, Timeout) of
-                {ok, HeaderBlock, Rest} ->
-                    validate_response(HeaderBlock, Key, Rest);
-                Error ->
-                    Error
-            end;
-        Error ->
-            Error
+            read_and_validate(Socket, Key, Timeout);
+        {error, Reason} ->
+            {error, {handshake_send_failed, Reason}}
     end.
 
 % http 请求头
@@ -31,6 +35,18 @@ request(Host, Port, Path, Key) ->
         <<"\r\n">>
     ].
 
+read_and_validate(Socket, Key, Timeout) ->
+    case read_response(Socket, <<>>, Timeout) of
+        {ok, HeaderBlock, Rest} ->
+            validate_response(HeaderBlock, Key, Rest);
+        {error, Reason} ->
+            {error, {handshake_read_failed, Reason}}
+    end.
+
+% 读取响应头
+read_response(_Socket, Acc, _Timeout)
+    when byte_size(Acc) > ?MAX_HEADER_SIZE ->
+    {error, header_too_large};
 read_response(Socket, Acc, Timeout) ->
     case binary:match(Acc, <<"\r\n\r\n">>) of
         {Pos, 4} ->
@@ -39,8 +55,10 @@ read_response(Socket, Acc, Timeout) ->
             {ok, HeaderBlock, Rest};
         nomatch ->
             case gen_tcp:recv(Socket, 0, Timeout) of
-                {ok, Data} ->
+                {ok, Data} when byte_size(Acc) + byte_size(Data) =< ?MAX_HEADER_SIZE ->
                     read_response(Socket, <<Acc/binary, Data/binary>>, Timeout);
+                {ok, _Data} ->
+                    {error, header_too_large};
                 Error ->
                     Error
             end
@@ -78,7 +96,7 @@ parse_headers(Lines) ->
 parse_header(Line, Acc) ->
     case binary:split(Line, <<":">>) of
         [Name, Value] ->
-            maps:put(lower_bin(trim(Name)), trim(Value), Acc);
+            maps:put(lower_ascii(trim(Name)), trim(Value), Acc);
         _ ->
             Acc
     end.
@@ -86,7 +104,7 @@ parse_header(Line, Acc) ->
 valid_upgrade(Headers) ->
     case maps:get(<<"upgrade">>, Headers, undefined) of
         undefined -> false;
-        Value -> lower_bin(Value) =:= <<"websocket">>
+        Value -> lower_ascii(Value) =:= <<"websocket">>
     end.
 
 valid_connection(Headers) ->
@@ -94,15 +112,12 @@ valid_connection(Headers) ->
         undefined ->
             false;
         Value ->
-            binary:match(lower_bin(Value), <<"upgrade">>) =/= nomatch
+            binary:match(lower_ascii(Value), <<"upgrade">>) =/= nomatch
     end.
 
 valid_accept(Headers, Key) ->
     Expected = base64:encode(crypto:hash(sha, <<Key/binary, ?WS_GUID/binary>>)),
     maps:get(<<"sec-websocket-accept">>, Headers, undefined) =:= Expected.
-
-lower_bin(Bin) ->
-    list_to_binary(string:lowercase(binary_to_list(Bin))).
 
 -spec trim(binary()) -> binary().
 trim(Bin)->
