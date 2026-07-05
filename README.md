@@ -11,6 +11,7 @@
 - WebSocket frame 解码
 - 客户端发送 frame 时自动 mask
 - 文本、二进制、ping、pong、close
+- 分片消息重组
 
 ## 数据结构
 
@@ -35,7 +36,6 @@ WebSocket frame 使用固定 record，定义在 `include/raw_ws.hrl`：
 暂未实现：
 
 - `wss://` TLS 连接
-- 分片消息重组
 - extension / compression
 - 完整 OTP `gen_server` 封装
 
@@ -96,5 +96,4 @@ ok = raw_ws_client:close(C1).
 1. 把 `raw_ws_client` 改成 `gen_server`
 2. 增加自动心跳
 3. 增加断线重连
-4. 支持分片消息
-5. 支持 `wss://`
+4. 支持 `wss://`
