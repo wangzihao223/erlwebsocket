@@ -12,6 +12,8 @@
 - 客户端发送 frame 时自动 mask
 - 文本、二进制、ping、pong、close
 - 分片消息重组
+- OTP `gen_server` 连接进程
+- `{active, once}` 异步 TCP 接收
 
 ## 数据结构
 
@@ -37,7 +39,6 @@ WebSocket frame 使用固定 record，定义在 `include/raw_ws.hrl`：
 
 - `wss://` TLS 连接
 - extension / compression
-- 完整 OTP `gen_server` 封装
 
 ## 编译
 
@@ -89,11 +90,28 @@ ok = raw_ws_client:send_ping(C1).
 ok = raw_ws_client:close(C1).
 ```
 
+## Active Once 连接进程
+
+`raw_ws_connection` 使用一个 `gen_server` 管理一条 WebSocket 连接。连接完成握手后切换到 `{active, once}`，收到 TCP 数据后解析完整 WebSocket 消息，再发给 owner 进程：
+
+```erlang
+{ok, Pid} = raw_ws_connection:start_link("localhost", 8080, "/ws").
+ok = raw_ws_connection:send_text(Pid, <<"hello websocket">>).
+
+receive
+    {websocket, Pid, {text, Payload}} ->
+        Payload;
+    {websocket_error, Pid, Reason} ->
+        Reason;
+    {websocket_closed, Pid, Reason} ->
+        Reason
+end.
+```
+
 ## 下一步
 
 建议按这个顺序继续完善：
 
-1. 把 `raw_ws_client` 改成 `gen_server`
-2. 增加自动心跳
-3. 增加断线重连
-4. 支持 `wss://`
+1. 增加自动心跳
+2. 增加断线重连
+3. 支持 `wss://`

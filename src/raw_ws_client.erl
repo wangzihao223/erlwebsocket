@@ -96,33 +96,33 @@ recv(State = #ws{socket = Socket, buffer = Buffer, timeout = Timeout}) ->
 %% 根据 opcode 处理单个 frame。
 %% text/binary 分片会暂存在 State#ws.fragments，最后一个 continuation 到达后再返回事件。
 -spec handle_frame(ws(), #ws_frame{}) -> recv_result().
-handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = true, opcode = 16#1, payload = Payload}) ->
+handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = true, opcode = ?OP_TEXT, payload = Payload}) ->
     {ok, {text, Payload}, State};
-handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = true, opcode = 16#2, payload = Payload}) ->
+handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = true, opcode = ?OP_BINARY, payload = Payload}) ->
     {ok, {binary, Payload}, State};
-handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = false, opcode = 16#1, payload = Payload}) ->
+handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = false, opcode = ?OP_TEXT, payload = Payload}) ->
     recv(State#ws{fragments = {text, [Payload]}});
-handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = false, opcode = 16#2, payload = Payload}) ->
+handle_frame(State = #ws{fragments = undefined}, #ws_frame{fin = false, opcode = ?OP_BINARY, payload = Payload}) ->
     recv(State#ws{fragments = {binary, [Payload]}});
-handle_frame(State = #ws{fragments = undefined}, #ws_frame{opcode = 16#0, payload = Payload}) ->
+handle_frame(State = #ws{fragments = undefined}, #ws_frame{opcode = ?OP_CONTINUATION, payload = Payload}) ->
     {error, {unexpected_continuation, Payload}, State};
-handle_frame(State = #ws{fragments = {Type, Parts}}, #ws_frame{fin = false, opcode = 16#0, payload = Payload}) ->
+handle_frame(State = #ws{fragments = {Type, Parts}}, #ws_frame{fin = false, opcode = ?OP_CONTINUATION, payload = Payload}) ->
     recv(State#ws{fragments = {Type, [Payload | Parts]}});
-handle_frame(State = #ws{fragments = {Type, Parts}}, #ws_frame{fin = true, opcode = 16#0, payload = Payload}) ->
+handle_frame(State = #ws{fragments = {Type, Parts}}, #ws_frame{fin = true, opcode = ?OP_CONTINUATION, payload = Payload}) ->
     FullPayload = iolist_to_binary(lists:reverse([Payload | Parts])),
     {ok, {Type, FullPayload}, State#ws{fragments = undefined}};
-handle_frame(State = #ws{fragments = Fragments}, #ws_frame{opcode = 16#1, payload = Payload})
+handle_frame(State = #ws{fragments = Fragments}, #ws_frame{opcode = ?OP_TEXT, payload = Payload})
         when Fragments =/= undefined ->
-    {error, {fragment_interrupted, 16#1, Payload}, State};
-handle_frame(State = #ws{fragments = Fragments}, #ws_frame{opcode = 16#2, payload = Payload})
+    {error, {fragment_interrupted, ?OP_TEXT, Payload}, State};
+handle_frame(State = #ws{fragments = Fragments}, #ws_frame{opcode = ?OP_BINARY, payload = Payload})
         when Fragments =/= undefined ->
-    {error, {fragment_interrupted, 16#2, Payload}, State};
-handle_frame(State = #ws{socket = Socket}, #ws_frame{opcode = 16#9, payload = Payload}) ->
+    {error, {fragment_interrupted, ?OP_BINARY, Payload}, State};
+handle_frame(State = #ws{socket = Socket}, #ws_frame{opcode = ?OP_PING, payload = Payload}) ->
     ok = gen_tcp:send(Socket, raw_ws_frame:encode(pong, Payload)),
     {ok, {ping, Payload}, State};
-handle_frame(State, #ws_frame{opcode = 16#A, payload = Payload}) ->
+handle_frame(State, #ws_frame{opcode = ?OP_PONG, payload = Payload}) ->
     {ok, {pong, Payload}, State};
-handle_frame(State = #ws{socket = Socket}, #ws_frame{opcode = 16#8, payload = Payload}) ->
+handle_frame(State = #ws{socket = Socket}, #ws_frame{opcode = ?OP_CLOSE, payload = Payload}) ->
     _ = gen_tcp:send(Socket, raw_ws_frame:encode(close, Payload)),
     gen_tcp:close(Socket),
     {ok, parse_close(Payload), State};

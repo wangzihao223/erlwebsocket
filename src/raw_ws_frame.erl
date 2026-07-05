@@ -1,6 +1,6 @@
 -module(raw_ws_frame).
 
--export([encode/2, encode/3, read/3]).
+-export([encode/2, encode/3, decode/1, read/3]).
 
 -include("../include/raw_ws.hrl").
 
@@ -8,6 +8,7 @@
 %% continuation=0, text=1, binary=2, close=8, ping=9, pong=10。
 -type frame_type() :: continuation | text | binary | close | ping | pong.
 -type opcode() :: 0..15.
+-type decode_result() :: {ok, #ws_frame{}, binary()} | {more, binary()} | {error, term()}.
 -type read_result() :: {ok, #ws_frame{}, binary()} | {error, term()}.
 -type read_socket() :: gen_tcp:socket() | undefined.
 -type mask_key() :: <<_:32>>.
@@ -33,40 +34,64 @@ encode(Opcode, Payload) when is_integer(Opcode) ->
 %% 后续片使用 continuation，最后一片 Fin=true。
 -spec encode(boolean(), frame_type() | opcode(), iodata()) -> binary().
 encode(Fin, continuation, Payload) ->
-    encode(Fin, 16#0, Payload);
+    encode(Fin, ?OP_CONTINUATION, Payload);
 encode(Fin, text, Payload) ->
-    encode(Fin, 16#1, Payload);
+    encode(Fin, ?OP_TEXT, Payload);
 encode(Fin, binary, Payload) ->
-    encode(Fin, 16#2, Payload);
+    encode(Fin, ?OP_BINARY, Payload);
 encode(Fin, close, Payload) ->
-    encode(Fin, 16#8, Payload);
+    encode(Fin, ?OP_CLOSE, Payload);
 encode(Fin, ping, Payload) ->
-    encode(Fin, 16#9, Payload);
+    encode(Fin, ?OP_PING, Payload);
 encode(Fin, pong, Payload) ->
-    encode(Fin, 16#A, Payload);
+    encode(Fin, ?OP_PONG, Payload);
 encode(Fin, Opcode, Payload0) when is_boolean(Fin), is_integer(Opcode) ->
     Payload = iolist_to_binary(Payload0),
     Len = byte_size(Payload),
     %% 第一个字节：最高位是 FIN，低 4 位是 opcode。
     FinBit =
         case Fin of
-            true -> 16#80;
+            true -> ?FIN_BIT;
             false -> 0
         end,
     FinAndOpcode = FinBit bor Opcode,
     %% 客户端发给服务端的帧必须带 mask，所以第二个字节最高位固定为 1。
-    MaskBit = 16#80,
+    MaskBit = ?MASK_BIT,
     MaskKey = crypto:strong_rand_bytes(4),
     MaskedPayload = mask(Payload, MaskKey),
     %% payload 长度小于 126 时直接写入第二个字节；
     %% 126 表示后面跟 16 位长度，127 表示后面跟 64 位长度。
     case Len of
-        _ when Len < 126 ->
+        _ when Len < ?PAYLOAD_LEN_16 ->
             <<FinAndOpcode, (MaskBit bor Len), MaskKey/binary, MaskedPayload/binary>>;
         _ when Len < 65536 ->
-            <<FinAndOpcode, (MaskBit bor 126), Len:16/big, MaskKey/binary, MaskedPayload/binary>>;
+            <<FinAndOpcode, (MaskBit bor ?PAYLOAD_LEN_16), Len:16/big, MaskKey/binary, MaskedPayload/binary>>;
         _ ->
-            <<FinAndOpcode, (MaskBit bor 127), Len:64/big, MaskKey/binary, MaskedPayload/binary>>
+            <<FinAndOpcode, (MaskBit bor ?PAYLOAD_LEN_64), Len:64/big, MaskKey/binary, MaskedPayload/binary>>
+    end.
+
+%% 从已有二进制 Buffer 中非阻塞解析一个完整 frame。
+%% active once 模式下不能在解析函数里 gen_tcp:recv，所以数据不够时返回 {more, Buffer}。
+-spec decode(binary()) -> decode_result().
+decode(Buffer) when byte_size(Buffer) < 2 ->
+    {more, Buffer};
+decode(Buffer = <<B1, B2, Rest1/binary>>) ->
+    Fin = (B1 band ?FIN_BIT) =/= 0,
+    Rsv = (B1 band ?RSV_MASK) bsr 4,
+    Opcode = B1 band ?OPCODE_MASK,
+    Masked = (B2 band ?MASK_BIT) =/= 0,
+    Len0 = B2 band ?PAYLOAD_LEN_MASK,
+    maybe
+        ok ?= validate_rsv(Rsv),
+        {ok, Len, Rest2} ?= decode_length(Len0, Rest1),
+        ok ?= validate_control_frame(Fin, Opcode, Len),
+        {ok, Frame, Rest} ?= decode_payload(Rest2, Fin, Rsv, Opcode, Masked, Len),
+        {ok, Frame, Rest}
+    else
+        {more, _Partial} ->
+            {more, Buffer};
+        Error ->
+            Error
     end.
 
 %% 从已有 Buffer 和 Socket 中读取一个完整 frame。
@@ -83,11 +108,11 @@ read(Socket, Buffer, Timeout) ->
 %% 解析 WebSocket 帧头的前两个字节：FIN/RSV/opcode/MASK/长度标记。
 -spec parse_header(read_socket(), byte(), byte(), binary(), timeout()) -> read_result().
 parse_header(Socket, B1, B2, Rest1, Timeout) ->
-    Fin = (B1 band 16#80) =/= 0,
-    Rsv = (B1 band 16#70) bsr 4,
-    Opcode = B1 band 16#0F,
-    Masked = (B2 band 16#80) =/= 0,
-    Len0 = B2 band 16#7F,
+    Fin = (B1 band ?FIN_BIT) =/= 0,
+    Rsv = (B1 band ?RSV_MASK) bsr 4,
+    Opcode = B1 band ?OPCODE_MASK,
+    Masked = (B2 band ?MASK_BIT) =/= 0,
+    Len0 = B2 band ?PAYLOAD_LEN_MASK,
     case validate_rsv(Rsv) of
         ok ->
             case read_length(Socket, Len0, Rest1, Timeout) of
@@ -125,22 +150,36 @@ validate_control_frame(Fin, Opcode, Len) ->
     end.
 
 -spec is_control_opcode(opcode()) -> boolean().
-is_control_opcode(16#8) -> true;
-is_control_opcode(16#9) -> true;
-is_control_opcode(16#A) -> true;
+is_control_opcode(?OP_CLOSE) -> true;
+is_control_opcode(?OP_PING) -> true;
+is_control_opcode(?OP_PONG) -> true;
 is_control_opcode(_) -> false.
+
+%% active once 模式下只从 Buffer 读取长度字段；不够就等待下一次 {tcp, Socket, Data}。
+-spec decode_length(non_neg_integer(), binary()) ->
+    {ok, non_neg_integer(), binary()} | {more, binary()}.
+decode_length(Len, Rest) when Len < ?PAYLOAD_LEN_16 ->
+    {ok, Len, Rest};
+decode_length(?PAYLOAD_LEN_16, Rest) when byte_size(Rest) < 2 ->
+    {more, Rest};
+decode_length(?PAYLOAD_LEN_16, <<Len:16/big, Rest/binary>>) ->
+    {ok, Len, Rest};
+decode_length(?PAYLOAD_LEN_64, Rest) when byte_size(Rest) < 8 ->
+    {more, Rest};
+decode_length(?PAYLOAD_LEN_64, <<Len:64/big, Rest/binary>>) ->
+    {ok, Len, Rest}.
 
 %% 根据第二个字节里的长度标记读取真实 payload 长度。
 -spec read_length(read_socket(), non_neg_integer(), binary(), timeout()) ->
     {ok, non_neg_integer(), binary()} | {error, term()}.
-read_length(_Socket, Len, Rest, _Timeout) when Len < 126 ->
+read_length(_Socket, Len, Rest, _Timeout) when Len < ?PAYLOAD_LEN_16 ->
     {ok, Len, Rest};
-read_length(Socket, 126, Rest, Timeout) ->
+read_length(Socket, ?PAYLOAD_LEN_16, Rest, Timeout) ->
     case take(Socket, Rest, 2, Timeout) of
         {ok, <<Len:16/big>>, Rest2} -> {ok, Len, Rest2};
         Error -> Error
     end;
-read_length(Socket, 127, Rest, Timeout) ->
+read_length(Socket, ?PAYLOAD_LEN_64, Rest, Timeout) ->
     case take(Socket, Rest, 8, Timeout) of
         {ok, <<Len:64/big>>, Rest2} -> {ok, Len, Rest2};
         Error -> Error
@@ -158,6 +197,33 @@ read_mask_and_payload(Socket, Rest, Timeout, Fin, Rsv, Opcode, true, Len) ->
     end;
 read_mask_and_payload(Socket, Rest, Timeout, Fin, Rsv, Opcode, false, Len) ->
     read_payload(Socket, Rest, Timeout, Fin, Rsv, Opcode, Len, undefined).
+
+%% active once 模式下只从 Buffer 读取 payload；不够就等待更多 TCP 数据。
+-spec decode_payload(binary(), boolean(), 0..7, opcode(), boolean(), non_neg_integer()) ->
+    decode_result().
+decode_payload(Rest, _Fin, _Rsv, _Opcode, true, Len) when byte_size(Rest) < 4 + Len ->
+    {more, Rest};
+decode_payload(<<MaskKey:4/binary, Rest/binary>>, Fin, Rsv, Opcode, true, Len) ->
+    <<Payload0:Len/binary, Rest2/binary>> = Rest,
+    Payload = mask(Payload0, MaskKey),
+    {ok, #ws_frame{
+        fin = Fin,
+        rsv = Rsv,
+        opcode = Opcode,
+        masked = true,
+        payload = Payload
+    }, Rest2};
+decode_payload(Rest, _Fin, _Rsv, _Opcode, false, Len) when byte_size(Rest) < Len ->
+    {more, Rest};
+decode_payload(Rest, Fin, Rsv, Opcode, false, Len) ->
+    <<Payload:Len/binary, Rest2/binary>> = Rest,
+    {ok, #ws_frame{
+        fin = Fin,
+        rsv = Rsv,
+        opcode = Opcode,
+        masked = false,
+        payload = Payload
+    }, Rest2}.
 
 %% 读取 payload，并在有 mask key 时做一次 XOR 还原原始数据。
 -spec read_payload(read_socket(), binary(), timeout(), boolean(), 0..7,

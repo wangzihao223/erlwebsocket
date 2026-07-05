@@ -20,6 +20,10 @@ decode_masked_client_text_frame_test() ->
     ?assertEqual(true, Decoded#ws_frame.masked),
     ?assertEqual(<<"hello">>, Decoded#ws_frame.payload).
 
+decode_partial_frame_needs_more_data_test() ->
+    Partial = <<16#81, 5, "he">>,
+    ?assertEqual({more, Partial}, raw_ws_frame:decode(Partial)).
+
 decode_extended_16bit_payload_length_test() ->
     Payload = binary:copy(<<"a">>, 126),
     Frame = raw_ws_frame:encode(text, Payload),
