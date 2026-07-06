@@ -13,7 +13,7 @@
 -type handshake_result() :: {ok, binary()} | {error, term()}.
 
 %% 客户端握手入口：发送 HTTP Upgrade 请求，并校验服务端 101 响应。
--spec client(gen_tcp:socket(), unicode:chardata(), inet:port_number(),
+-spec client(gen_tcp:socket(), unicode:chardata() | inet:ip_address(), inet:port_number(),
     unicode:chardata(),
     timeout()) ->
     handshake_result().
@@ -29,11 +29,13 @@ client(Socket, Host, Port, Path, Timeout) ->
 
 %% 构造 WebSocket HTTP Upgrade 请求头。
 %% Sec-WebSocket-Key 是客户端随机生成的值，后续用于校验 Sec-WebSocket-Accept。
--spec request(unicode:chardata(), inet:port_number(), unicode:chardata(), binary()) -> iolist().
+-spec request(unicode:chardata() | inet:ip_address(), inet:port_number(), unicode:chardata(), binary()) -> iolist().
 request(Host, Port, Path, Key) ->
+    HostBin = format_host(Host),
+    PathBin = unicode:characters_to_binary(Path),
     [
-        <<"GET ">>, Path, <<" HTTP/1.1\r\n">>,
-        <<"Host: ">>, Host, <<":">>, integer_to_binary(Port), <<"\r\n">>,
+        <<"GET ">>, PathBin, <<" HTTP/1.1\r\n">>,
+        <<"Host: ">>, HostBin, <<":">>, integer_to_binary(Port), <<"\r\n">>,
         <<"Upgrade: websocket\r\n">>,
         <<"Connection: Upgrade\r\n">>,
         <<"Sec-WebSocket-Key: ">>, Key, <<"\r\n">>,
@@ -178,3 +180,16 @@ lower_ascii_char(C) when C >=$A, C=<$Z ->
     C+32;
 lower_ascii_char(C) ->
     C.
+
+-spec format_host(unicode:chardata() | inet:ip_address()) -> binary().
+format_host(Host) when is_binary(Host) ->
+    Host;
+format_host(Host) when is_list(Host) ->
+    unicode:characters_to_binary(Host);
+format_host({A, B, C, D}) ->
+    iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A, B, C, D]));
+format_host({A, B, C, D, E, F, G, H}) ->
+    iolist_to_binary(io_lib:format("[~.16B:~.16B:~.16B:~.16B:~.16B:~.16B:~.16B:~.16B]",
+        [
+          A, B, C, D, E, F, G, H
+        ])).

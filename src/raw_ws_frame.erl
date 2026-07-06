@@ -1,6 +1,6 @@
 -module(raw_ws_frame).
 
--export([encode/2, encode/3, decode/1, read/3]).
+-export([encode/2, encode/3, try_encode/2, try_encode/3, decode/1, read/3]).
 
 -include("../include/raw_ws.hrl").
 
@@ -10,44 +10,71 @@
 -type opcode() :: 0..15.
 -type decode_result() :: {ok, #ws_frame{}, binary()} | {more, binary()} | {error, term()}.
 -type read_result() :: {ok, #ws_frame{}, binary()} | {error, term()}.
+-type encode_result() :: {ok, binary()} | {error, term()}.
 -type read_socket() :: gen_tcp:socket() | undefined.
 -type mask_key() :: <<_:32>>.
 -type mask_key_tuple() :: {byte(), byte(), byte(), byte()}.
 
 %% 编码一个完整 WebSocket 帧，默认 FIN=true，表示这不是分片消息的中间片。
 -spec encode(frame_type() | opcode(), iodata()) -> binary().
-encode(text, Payload) ->
-    encode(true, text, Payload);
-encode(binary, Payload) ->
-    encode(true, binary, Payload);
-encode(close, Payload) ->
-    encode(true, close, Payload);
-encode(ping, Payload) ->
-    encode(true, ping, Payload);
-encode(pong, Payload) ->
-    encode(true, pong, Payload);
-encode(Opcode, Payload) when is_integer(Opcode) ->
-    encode(true, Opcode, Payload).
+encode(Type, Payload) ->
+    encode(true, Type, Payload).
 
 %% 编码一个可指定 FIN 的 WebSocket 帧。
 %% 分片发送时，第一片使用 text/binary 且 Fin=false；
 %% 后续片使用 continuation，最后一片 Fin=true。
 -spec encode(boolean(), frame_type() | opcode(), iodata()) -> binary().
-encode(Fin, continuation, Payload) ->
-    encode(Fin, ?OP_CONTINUATION, Payload);
-encode(Fin, text, Payload) ->
-    encode(Fin, ?OP_TEXT, Payload);
-encode(Fin, binary, Payload) ->
-    encode(Fin, ?OP_BINARY, Payload);
-encode(Fin, close, Payload) ->
-    encode(Fin, ?OP_CLOSE, Payload);
-encode(Fin, ping, Payload) ->
-    encode(Fin, ?OP_PING, Payload);
-encode(Fin, pong, Payload) ->
-    encode(Fin, ?OP_PONG, Payload);
-encode(Fin, Opcode, Payload0) when is_boolean(Fin), is_integer(Opcode) ->
+encode(Fin, Type, Payload0) when is_boolean(Fin) ->
+    Opcode = opcode(Type),
     Payload = iolist_to_binary(Payload0),
     Len = byte_size(Payload),
+    assert_encode_allowed(Fin, Opcode, Len),
+    encode_frame(Fin, Opcode, Payload, Len).
+
+-spec opcode(frame_type() | opcode()) -> opcode().
+opcode(continuation) -> ?OP_CONTINUATION;
+opcode(text) -> ?OP_TEXT;
+opcode(binary) -> ?OP_BINARY;
+opcode(close) -> ?OP_CLOSE;
+opcode(ping) -> ?OP_PING;
+opcode(pong) -> ?OP_PONG;
+opcode(Opcode) when is_integer(Opcode), Opcode >= 0, Opcode =< 15 ->
+    Opcode;
+opcode(Type) ->
+    error({bad_opcode, Type}).
+
+-spec validate_data_opcode(opcode()) -> ok | {error, term()}.
+validate_data_opcode(Opcode)
+        when Opcode =:= ?OP_CONTINUATION;
+             Opcode =:= ?OP_TEXT;
+             Opcode =:= ?OP_BINARY;
+             Opcode =:= ?OP_CLOSE;
+             Opcode =:= ?OP_PING;
+             Opcode =:= ?OP_PONG ->
+    ok;
+validate_data_opcode(Opcode) ->
+    {error, {unsupported_opcode, Opcode}}.
+
+-spec assert_encode_allowed(boolean(), opcode(), non_neg_integer()) -> ok.
+assert_encode_allowed(Fin, Opcode, Len) ->
+    case validate_encode_allowed(Fin, Opcode, Len) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            error(Reason)
+    end.
+
+-spec validate_encode_allowed(boolean(), opcode(), non_neg_integer()) -> ok | {error, term()}.
+validate_encode_allowed(Fin, Opcode, Len) ->
+    case validate_data_opcode(Opcode) of
+        ok ->
+            validate_control_frame(Fin, Opcode, Len);
+        {error, _Reason} = Error ->
+            Error
+    end.
+
+-spec encode_frame(boolean(), opcode(), binary(), non_neg_integer()) -> binary().
+encode_frame(Fin, Opcode, Payload, Len) ->
     %% 第一个字节：最高位是 FIN，低 4 位是 opcode。
     FinBit =
         case Fin of
@@ -69,6 +96,29 @@ encode(Fin, Opcode, Payload0) when is_boolean(Fin), is_integer(Opcode) ->
         _ ->
             <<FinAndOpcode, (MaskBit bor ?PAYLOAD_LEN_64), Len:64/big, MaskKey/binary, MaskedPayload/binary>>
     end.
+
+-spec try_encode(frame_type() | opcode(), iodata()) -> encode_result().
+try_encode(Type, Payload) ->
+    try_encode(true, Type, Payload).
+
+-spec try_encode(boolean(), frame_type() | opcode(), iodata()) -> encode_result().
+try_encode(Fin, Type, Payload0) when is_boolean(Fin) ->
+    try
+        Opcode = opcode(Type),
+        Payload = iolist_to_binary(Payload0),
+        Len = byte_size(Payload),
+        case validate_encode_allowed(Fin, Opcode, Len) of
+            ok ->
+                {ok, encode_frame(Fin, Opcode, Payload, Len)};
+            {error, Reason} ->
+                {error, Reason}
+        end
+    catch
+        error:ErrorReason ->
+            {error, ErrorReason}
+    end;
+try_encode(Fin, _Type, _Payload) ->
+    {error, {bad_fin, Fin}}.
 
 %% 从已有二进制 Buffer 中非阻塞解析一个完整 frame。
 %% active once 模式下不能在解析函数里 gen_tcp:recv，所以数据不够时返回 {more, Buffer}。

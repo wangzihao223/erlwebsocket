@@ -39,6 +39,12 @@ decode_ping_frame_test() ->
     ?assertEqual(16#9, Decoded#ws_frame.opcode),
     ?assertEqual(<<"abc">>, Decoded#ws_frame.payload).
 
+encode_rejects_reserved_opcode_test() ->
+    ?assertError({unsupported_opcode, 16#3}, raw_ws_frame:encode(16#3, <<>>)).
+
+encode_rejects_fragmented_control_frame_test() ->
+    ?assertError({fragmented_control_frame, 16#9}, raw_ws_frame:encode(false, ping, <<>>)).
+
 reject_unsupported_rsv_test() ->
     Frame = <<16#C1, 0>>,
     ?assertEqual({error, {unsupported_rsv, 4}}, raw_ws_frame:read(undefined, Frame, 1000)).
